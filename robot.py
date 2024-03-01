@@ -24,7 +24,7 @@ class Network(torch.nn.Module):
     def __init__(self):
         # Call the initialisation function of the parent class.
         super(Network, self).__init__()
-        # Define the network layers. This example network has two hidden layers, each with 10 units.
+        
         self.layer_1 = torch.nn.Linear(in_features=4, out_features=20, dtype=torch.float32)
         self.layer_2 = torch.nn.Linear(in_features=20, out_features=20, dtype=torch.float32)
         self.output_layer = torch.nn.Linear(in_features=20, out_features=2, dtype=torch.float32)
@@ -35,6 +35,43 @@ class Network(torch.nn.Module):
         layer_2_output = torch.nn.functional.relu(self.layer_2(layer_1_output))
         output = self.output_layer(layer_2_output)
         return output
+
+class ResidualLearningNetwork(torch.nn.Module):
+
+    # The class initialisation function.
+    def __init__(self):
+        # Call the initialisation function of the parent class.
+        super(ResidualLearningNetwork, self).__init__()
+        
+        self.layer_1 = torch.nn.Linear(in_features=4, out_features=20, dtype=torch.float32)
+        self.layer_2 = torch.nn.Linear(in_features=20, out_features=20, dtype=torch.float32)
+        self.output_layer = torch.nn.Linear(in_features=20, out_features=1, dtype=torch.float32)
+
+    # Function which sends some input data through the network and returns the network's output.
+    def forward(self, input):
+        layer_1_output = torch.nn.functional.relu(self.layer_1(input))
+        layer_2_output = torch.nn.functional.relu(self.layer_2(layer_1_output))
+        output = self.output_layer(layer_2_output)
+        return output
+    
+class BehaviouralCloningNetwork(torch.nn.Module):
+
+    # The class initialisation function.
+    def __init__(self):
+        # Call the initialisation function of the parent class.
+        super(BehaviouralCloningNetwork, self).__init__()
+        
+        self.layer_1 = torch.nn.Linear(in_features=2, out_features=20, dtype=torch.float32)
+        self.layer_2 = torch.nn.Linear(in_features=20, out_features=20, dtype=torch.float32)
+        self.output_layer = torch.nn.Linear(in_features=20, out_features=2, dtype=torch.float32)
+
+    # Function which sends some input data through the network and returns the network's output.
+    def forward(self, input):
+        layer_1_output = torch.nn.functional.relu(self.layer_1(input))
+        layer_2_output = torch.nn.functional.relu(self.layer_2(layer_1_output))
+        output = self.output_layer(layer_2_output)
+        return output
+
 
 
 class Robot:
@@ -62,9 +99,14 @@ class Robot:
         self.middle_buffer_size = 0
         self.goal_buffer_size = 0
         #Buffer with state, action, next_state
-        self.replay_buffer_start = np.zeros([1, 3, 2])
-        self.replay_buffer_middle = np.zeros([1, 3, 2])
-        self.replay_buffer_goal = np.zeros([1, 3, 2])
+        self.replay_buffer_start = np.zeros([1, 4, 2])
+        self.replay_buffer_middle = np.zeros([1, 4, 2])
+        self.replay_buffer_goal = np.zeros([1, 4, 2])
+        self.behavioural_cloning_buffer = np.zeros([1, 2, 2])
+        self.behavioural_cloning_buffer_size = 0
+        self.residual_buffer = np.zeros([1, 3, 2])
+        self.residual_buffer_size = 0
+        
         self.is_first_state = True
         self.first_state = [0,0]
         self.START_BUFFER_DISTANCE_THRESHOLD = 25
@@ -72,8 +114,10 @@ class Robot:
         self.dynamics_model_network_start = Network()
         self.dynamics_model_network_middle = Network()
         self.dynamics_model_network_goal = Network()
+        self.behavioural_cloning_network = BehaviouralCloningNetwork()
+        self.residual_learning_network = ResidualLearningNetwork()
         #Training action type
-        self.train_action = 'semi-random'
+        self.train_action = 'trick'
         #Current path
         self.current_path = []
         #Randomness
@@ -83,6 +127,8 @@ class Robot:
         self.explore_near_goal = True
         self.near_goal_explorations = 0
         self.MAX_NEAR_GOAL_EXPLORATIONS = 50
+        self.first_demonstration_process = False
+        self.demonstration_process = False
         #Cross entropy method parameters
         self.CEM_NUM_ITERATIONS = 10
         self.CEM_NUM_PATHS = 50
@@ -109,6 +155,7 @@ class Robot:
             print('Resetting the environment')
             return 'reset'
         if True:
+            print(self.train_action)
             return 'step'
 
     def get_next_action_training(self, state, money_remaining):
@@ -121,7 +168,6 @@ class Robot:
             pass
             distances = np.linalg.norm(self.replay_buffer_middle[:-200, 0] - state, axis=1)
             arg_closest_state = np.argmin(distances)
-            print(arg_closest_state, distances.shape[0])
             closest_state = self.replay_buffer_middle[arg_closest_state, 0]
             angle = np.arctan((closest_state[0] - state[0]) / (closest_state[1] - state[1] + 0.0001))
             angle += np.random.uniform(0.7, 1.3) * np.pi
@@ -139,47 +185,49 @@ class Robot:
             else:
                 action = np.random.uniform(-constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION, 2)
             
-        elif self.train_action == 'cross_entropy':
-            pass
-        elif self.train_action == 'explore near goal':
             action = np.random.uniform(-constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION, 2)
+        elif self.train_action == 'residual':
+            baseline_action = self.behavioural_cloning_network.forward(torch.tensor(state, dtype=torch.float32)).detach().numpy()
+            residual_action = self.residual_learning_network.forward(torch.tensor(np.concatenate((state, baseline_action), axis=0), dtype=torch.float32)).detach().numpy()
+            residual_action_with_noise = residual_action + np.random.normal(0, 2, 2)
+            action = baseline_action + residual_action_with_noise
+            self.residual_action = residual_action_with_noise
+        elif self.train_action == 'behavioural cloning':
+            action = self.behavioural_cloning_network.forward(torch.tensor(state, dtype=torch.float32)).detach().numpy()
+
         return action
 
     def get_next_action_testing(self, state):
         # TODO: This returns an action to robot-learning.py, when get_next_action_type() returns 'step'
         # Currently just a random action is returned
-        self.cross_entropy_method_planning(state)
-        action = self.planned_actions[0]
+        baseline_action = self.behavioural_cloning_network.forward(torch.tensor(state, dtype=torch.float32)).detach().numpy()
+        residual_action = self.residual_learning_network.forward(torch.tensor(np.concatenate((state, baseline_action), axis=0), dtype=torch.float32)).detach().numpy()
+        residual_action_with_noise = residual_action + np.random.normal(0, 1, 2)
+        action = baseline_action + residual_action_with_noise
         return action
 
     # Function that processes a transition
     def process_transition(self, state, action, next_state, money_remaining):
-        #Add transition to replay buffer
+        reward = self.compute_reward_one_step(state, action, next_state)
+        double_reward = np.array([reward, reward])
+        
+        if self.train_action == 'trick':
+            self.behavioural_cloning_buffer = np.vstack((self.behavioural_cloning_buffer, np.array([[state, action]])))
+            if self.behavioural_cloning_buffer_size == 0:
+                print('Removing initial behavioural cloning buffer row')
+                self.behavioural_cloning_buffer = self.behavioural_cloning_buffer[1:]
+            self.behavioural_cloning_buffer_size += 1
+        elif self.train_action == 'residual':
+            self.residual_buffer = np.vstack((self.residual_buffer, np.array([[state, self.residual_action, double_reward]])))
+            if self.residual_buffer_size == 0:
+                print('Removing initial residual buffer row')
+                self.residual_buffer = self.residual_buffer[1:]
+            self.residual_buffer_size += 1
+        
 
-        if np.linalg.norm(state - self.first_state) < self.START_BUFFER_DISTANCE_THRESHOLD:
-            self.replay_buffer_start=np.vstack((self.replay_buffer_start, np.array([[state, action, next_state]])))
-            if self.start_buffer_size == 0:
-                print('Removing initial start buffer row')
-                self.replay_buffer_start = self.replay_buffer_start[1:]
-            self.start_buffer_size += 1
-        elif np.linalg.norm(state - self.goal_state) < 2 * constants.TEST_DISTANCE_THRESHOLD:
-            self.replay_buffer_goal=np.vstack((self.replay_buffer_goal, np.array([[state, action, next_state]])))
-            if self.goal_buffer_size == 0:
-                print('Removing initial goal buffer row')
-                self.replay_buffer_goal = self.replay_buffer_goal[1:]
-            self.goal_buffer_size += 1
-        else:
-            self.replay_buffer_middle=np.vstack((self.replay_buffer_middle, np.array([[state, action, next_state]])))
-            if self.middle_buffer_size == 0:
-                print('Removing initial middle buffer row')
-                self.replay_buffer_middle = self.replay_buffer_middle[1:]
-            self.middle_buffer_size += 1
-        
-        #Calculate the 'reward' for the transition
-        reward = np.sqrt(np.sum((next_state - state)**2)) / np.sqrt(np.sum((action)**2))
-        
         #Show the transition in the visualisation
-        self.paths_to_draw.append(PathToDraw(np.array([state, next_state]), (255*reward, 255*reward, 255*reward), 2))
+        speed_reward = np.linalg.norm(next_state - state) / np.linalg.norm(action)
+        self.paths_to_draw.append(PathToDraw(np.array([state, next_state]), (255*speed_reward, 255*speed_reward, 255*speed_reward), 2))
         
         self.step += 1
         
@@ -189,36 +237,66 @@ class Robot:
             self.goal_currently_found = True
         
         #Reset if the goal is reached or the step limit is reached
-        if self.goal_currently_found and self.explore_near_goal and self.near_goal_explorations < self.MAX_NEAR_GOAL_EXPLORATIONS:
-            self.train_action = 'explore near goal'
-            self.near_goal_explorations += 1
-        elif self.step > 500 or self.goal_currently_found:
-            print('MONEY REMAINING: ', money_remaining)
-            self.randomness = self.randomness * 0.9
-            self.reset = True 
-            self.train_action = 'perp'
-            print("REWARD:", self.compute_reward(self.current_path))
-            # print('currentpath', self.current_path[:, 0])
-        #Increment step counter
+        # if self.goal_currently_found and self.explore_near_goal and self.near_goal_explorations < self.MAX_NEAR_GOAL_EXPLORATIONS:
+        #     self.train_action = 'explore near goal'
+        #     self.near_goal_explorations += 1
+        if self.train_action == 'trick':
+            if self.step > 500 or self.goal_currently_found:
+                print('MONEY REMAINING: ', money_remaining)
+                #self.randomness = self.randomness * 0.9
+                self.reset = True 
+                self.train_action = 'behavioural cloning'
+                self.demonstration_process = True
+                self.first_demonstration_process = True
+                if self.first_demonstration_process:
+                    self.train_behavioural_cloning(500)
+                    self.first_demonstration_process = False
+                if self.demonstration_process:
+                    self.train_behavioural_cloning(20)
+                if self.residual_buffer_size > 50:
+                    self.train_residual_learning(20)
+                print("REWARD:", self.compute_reward(self.current_path))
+        elif self.train_action == 'behavioural cloning':
+            if self.step > 200 or self.goal_currently_found:
+                print('MONEY REMAINING: ', money_remaining)
+                self.reset = True 
+                #self.train_action = 'residual'
+                if self.demonstration_process:
+                    self.train_behavioural_cloning(50)
+                if self.residual_buffer_size > 50:
+                    self.train_residual_learning(50)
+                print("REWARD:", self.compute_reward(self.current_path))
+        elif self.train_action == 'residual':
+            if self.step > 200 or self.goal_currently_found:
+                print('MONEY REMAINING: ', money_remaining)
+                self.reset = True 
+                if self.demonstration_process:
+                    self.train_behavioural_cloning(50)
+                if self.residual_buffer_size > 50:
+                    self.train_residual_learning(50)
+                print("REWARD:", self.compute_reward(self.current_path))
 
+        
+
+        
         #Train model if enough transitions have been collected
-        if self.start_buffer_size == 50:
-            print('Training model')
-            self.train_model(20, 'start')
-        elif self.start_buffer_size > 50:
-            self.train_model(5, 'start')
+        # if self.start_buffer_size == 50:
+        #     print('Training model')
+        #     self.train_model(20, 'start')
+        # elif self.start_buffer_size > 50:
+        #     self.train_model(5, 'start')
         
-        if self.middle_buffer_size == 50:
-            print('Training model')
-            self.train_model(20, 'middle')
-        elif self.middle_buffer_size > 50:
-            self.train_model(5, 'middle')
+        # if self.middle_buffer_size == 50:
+        #     print('Training model')
+        #     self.train_model(20, 'middle')
+        # elif self.middle_buffer_size > 50:
+        #     self.train_model(5, 'middle')
         
-        if self.goal_buffer_size == 50:
-            print('Training model')
-            self.train_model(20, 'goal')
-        elif self.goal_buffer_size > 50:
-            self.train_model(5,'goal')
+        # if self.goal_buffer_size == 50:
+        #     print('Training model')
+        #     self.train_model(20, 'goal')
+        # elif self.goal_buffer_size > 50:
+        #     self.train_model(5,'goal')
             
             
         
@@ -304,9 +382,9 @@ class Robot:
         return total_reward
 
     def compute_reward_one_step(self, state, action, next_state):
-        speed_reward = np.linalg.norm(next_state - state) / np.linalg.norm(action, axis = 1)
+        speed_reward = np.linalg.norm(next_state - state) / np.linalg.norm(action)
         distance_reward = -np.linalg.norm(next_state - self.goal_state)
-        goal_reached = int(np.linalg.norm(next_state[-1, 0] - self.goal_state) < constants.TEST_DISTANCE_THRESHOLD)
+        goal_reached = int(np.linalg.norm(next_state - self.goal_state) < constants.TEST_DISTANCE_THRESHOLD)
         
         total_reward = 10*(speed_reward) + 0.8 * distance_reward + 100*goal_reached
         return total_reward
@@ -368,3 +446,73 @@ class Robot:
         self.paths_to_draw.append(PathToDraw(self.planned_path, (255, 255, 255), 2))
         # return self.compute_reward(self.planned_path)
     
+    def train_behavioural_cloning(self, num_iterations):
+        buffer = self.behavioural_cloning_buffer
+        buffer_size = self.behavioural_cloning_buffer_size
+        model = self.behavioural_cloning_network
+        optimiser = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        losses = []
+        iterations = []
+        for training_iteration in range(num_iterations):
+            minibatch_indices = np.random.choice(range(buffer_size), 5)
+            minibatch_inputs = buffer[minibatch_indices, 0]
+            minibatch_labels = buffer[minibatch_indices, 1]
+            minibatch_inputs = np.squeeze(minibatch_inputs)
+            minibatch_labels = np.squeeze(minibatch_labels)
+
+            # Convert the NumPy array into a Torch tensor
+            minibatch_input_tensor = torch.tensor(minibatch_inputs, dtype=torch.float32)
+            minibatch_labels_tensor = torch.tensor(minibatch_labels, dtype=torch.float32)
+            # Do a forward pass of the network using the inputs batch
+            network_prediction = model.forward(minibatch_input_tensor)
+            # Compute the loss based on the label's batch
+            loss = torch.nn.MSELoss()(network_prediction, minibatch_labels_tensor)
+            # Compute the gradients based on this loss,
+            # i.e. the gradients of the loss with respect to the network parameters.
+            optimiser.zero_grad()
+            loss.backward()
+            # Take one gradient step to update the network
+            optimiser.step()
+            # Get the loss as a scalar value
+            loss_value = loss.item()
+            # Print out this loss
+            #print('Iteration ' + str(training_iteration) + ', Loss = ' + str(loss_value))
+        # Store this loss in the list
+        losses.append(loss_value)
+        # Update the list of iterations
+        iterations.append(training_iteration)
+
+    
+    def train_residual_learning(self, num_iterations):
+        buffer = self.residual_buffer
+        buffer_size = self.residual_buffer_size
+        model = self.residual_learning_network
+        optimiser = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        losses = []
+        iterations = []
+        for training_iteration in range(num_iterations):
+            minibatch_indices = np.random.choice(range(buffer_size), 5)
+            minibatch_inputs = buffer[minibatch_indices, 0:2]
+            minibatch_labels = buffer[minibatch_indices, 2][0]
+            minibatch_inputs = np.reshape(minibatch_inputs, [5, 4])
+            # Convert the NumPy array into a Torch tensor
+            minibatch_input_tensor = torch.tensor(minibatch_inputs, dtype=torch.float32)
+            minibatch_labels_tensor = torch.tensor([minibatch_labels], dtype=torch.float32)
+            # Do a forward pass of the network using the inputs batch
+            network_prediction = model.forward(minibatch_input_tensor)
+            # Compute the loss based on the label's batch
+            loss = torch.nn.MSELoss()(network_prediction, minibatch_labels_tensor)
+            # Compute the gradients based on this loss,
+            # i.e. the gradients of the loss with respect to the network parameters.
+            optimiser.zero_grad()
+            loss.backward()
+            # Take one gradient step to update the network
+            optimiser.step()
+            # Get the loss as a scalar value
+            loss_value = loss.item()
+            # Print out this loss
+            #print('Iteration ' + str(training_iteration) + ', Loss = ' + str(loss_value))
+        # Store this loss in the list
+        losses.append(loss_value)
+        # Update the list of iterations
+        iterations.append(training_iteration)
